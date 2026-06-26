@@ -3,9 +3,8 @@ import pandas as pd
 from collections import defaultdict
 import io
 import re
-import requests
+import gspread
 from google.oauth2 import service_account
-import google.auth.transport.requests
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Tree Purity Distiller", page_icon="🌿", layout="wide")
@@ -32,44 +31,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── Google Drive loader ────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Fetching latest tree.csv from Google Drive…", ttl=300)
-def load_csv_from_drive() -> bytes:
-    sa_info   = dict(st.secrets["gcp_service_account"])
-    folder_id = st.secrets["DRIVE_FOLDER_ID"]
-
+# ── Google Sheets loader ──────────────────────────────────────────────────────
+@st.cache_data(show_spinner="Fetching latest data from Google Sheet…", ttl=300)
+def load_csv_from_sheet() -> bytes:
     creds = service_account.Credentials.from_service_account_info(
-        sa_info,
-        scopes=["https://www.googleapis.com/auth/drive.readonly"]
+        dict(st.secrets["gcp_service_account"]),
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
     )
-    auth_req = google.auth.transport.requests.Request()
-    creds.refresh(auth_req)
-    token   = creds.token
-    headers = {"Authorization": f"Bearer {token}"}
-
-    # Find tree.csv in folder
-    query = f"name='tree.csv' and '{folder_id}' in parents and trashed=false"
-    r = requests.get(
-        "https://www.googleapis.com/drive/v3/files",
-        params={"q": query, "fields": "files(id,name)"},
-        headers=headers,
-    )
-    r.raise_for_status()
-    files = r.json().get("files", [])
-    if not files:
-        raise FileNotFoundError(
-            "tree.csv not found in the folder. "
-            "Make sure the service account email has been shared on the Drive folder."
-        )
-
-    file_id = files[0]["id"]
-    dl = requests.get(
-        f"https://www.googleapis.com/drive/v3/files/{file_id}",
-        params={"alt": "media"},
-        headers=headers,
-    )
-    dl.raise_for_status()
-    return dl.content
+    gc     = gspread.authorize(creds)
+    sheet  = gc.open_by_key(st.secrets["SHEET_ID"]).worksheet("TreeData")
+    data   = sheet.get_all_values()
+    df     = pd.DataFrame(data[1:], columns=data[0])
+    return df.to_csv(index=False).encode()
 
 
 # ── Tree builder (vectorized — no iterrows) ────────────────────────────────────
@@ -172,7 +148,7 @@ st.caption("Fetches tree.csv from Google Drive · strips Shopsy nodes · returns
 
 tree_ready = False
 try:
-    csv_bytes = load_csv_from_drive()
+    csv_bytes = load_csv_from_sheet()
     path_map, id_to_path, children_by_path = build_tree(csv_bytes)
     col_info, col_btn = st.columns([5, 1])
     with col_info:
@@ -185,7 +161,7 @@ try:
 except FileNotFoundError as e:
     st.error(str(e))
 except KeyError as e:
-    st.error(f"Missing secret: {e}. Add [gcp_service_account] and DRIVE_FOLDER_ID in Streamlit Secrets.")
+    st.error(f"Missing secret: {e}. Add [gcp_service_account] and SHEET_ID in Streamlit Secrets.")
 except Exception as e:
     st.error(f"Could not load tree from Drive: {e}")
 
