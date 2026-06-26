@@ -28,6 +28,10 @@ st.markdown("""
         border-radius: 6px; padding: 2px 8px; font-size: 0.78rem; margin: 2px;
     }
     .stDeployButton {display: none !important;}
+    [data-testid="stDeployButton"] {display: none !important;}
+    [data-testid="stToolbarActionButtonLabel"] {display: none !important;}
+    [title="Fork this app"] {display: none !important;}
+    [href*="new?from="] {display: none !important;}
     .output-box {
         background: white; border: 1px solid #d0e1fd; border-radius: 10px;
         padding: 16px; font-family: monospace; font-size: 0.9rem;
@@ -49,8 +53,12 @@ st.markdown("""
 # ── Google Sheets loader ───────────────────────────────────────────────────────
 @st.cache_data(show_spinner="Loading data…", ttl=300)
 def load_csv_from_sheet() -> bytes:
+    sa_info = dict(st.secrets["gcp_service_account"])
+    # Fix private key newlines — TOML often stores \n as literal backslash-n
+    if "private_key" in sa_info:
+        sa_info["private_key"] = sa_info["private_key"].replace("\\n", "\n")
     creds = service_account.Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]),
+        sa_info,
         scopes=[
             "https://www.googleapis.com/auth/spreadsheets.readonly",
             "https://www.googleapis.com/auth/drive.readonly",
