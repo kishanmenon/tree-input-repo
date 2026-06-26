@@ -72,30 +72,52 @@ def load_csv_from_drive() -> bytes:
     return dl.content
 
 
-# ── Tree builder ───────────────────────────────────────────────────────────────
+# ── Tree builder (vectorized — no iterrows) ────────────────────────────────────
 @st.cache_data(show_spinner="Building tree index…")
 def build_tree(csv_bytes: bytes):
     df = pd.read_csv(io.BytesIO(csv_bytes))
     df["pathString"] = df["node_path"].str.replace(">", "/", regex=False)
+    df["node_id"]    = pd.to_numeric(df["node_id"], errors="coerce")
 
-    path_map = {}
-    for _, row in df.iterrows():
-        p    = row["pathString"]
-        nid  = int(row["node_id"]) if pd.notna(row["node_id"]) else None
-        name = str(row["node_name"]) if pd.notna(row["node_name"]) else p.split("/")[-1]
-        if p not in path_map:
-            path_map[p] = {"node_id": nid, "name": name}
-        elif nid is not None and path_map[p]["node_id"] is None:
-            path_map[p]["node_id"] = nid
+    # First valid node_id per path (vectorized groupby)
+    id_per_path = (
+        df.dropna(subset=["node_id", "pathString"])
+        .groupby("pathString")["node_id"]
+        .first()
+        .astype(int)
+        .to_dict()
+    )
 
+    # First valid node_name per path (vectorized groupby)
+    name_per_path = (
+        df.dropna(subset=["node_name", "pathString"])
+        .groupby("pathString")["node_name"]
+        .first()
+        .astype(str)
+        .to_dict()
+    )
+
+    # Build path_map in one dict comprehension
+    all_paths = df["pathString"].dropna().unique()
+    path_map  = {
+        p: {
+            "node_id": id_per_path.get(p),
+            "name":    name_per_path.get(p, p.rsplit("/", 1)[-1]),
+        }
+        for p in all_paths
+    }
+
+    # id to path lookup
     id_to_path = {v["node_id"]: k for k, v in path_map.items() if v["node_id"] is not None}
 
+    # Children map - rfind is faster than split+join for parent lookup
+    path_set         = set(path_map)
     children_by_path = defaultdict(list)
-    for p in sorted(path_map.keys(), key=lambda x: x.count("/")):
-        parts = p.split("/")
-        if len(parts) > 1:
-            parent = "/".join(parts[:-1])
-            if parent in path_map:
+    for p in path_map:
+        idx = p.rfind("/")
+        if idx > 0:
+            parent = p[:idx]
+            if parent in path_set:
                 children_by_path[parent].append(p)
 
     return path_map, id_to_path, children_by_path
