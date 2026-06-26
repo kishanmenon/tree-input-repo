@@ -397,8 +397,14 @@ if tree_ready:
             out_df["node_path"] = out_df["node_id"].map(
                 lambda x: id_to_path[x].replace("/", " > ") if x in id_to_path else "")
             st.dataframe(out_df, use_container_width=True, height=360)
-            st.download_button("⬇️ Download distilled_clean_node_ids.csv",
-                data=out_df.to_csv(index=False).encode(),
+
+            # Append not-found IDs as labelled rows at bottom of CSV
+            csv_content = out_df.to_csv(index=False)
+            if not_found:
+                nf_rows = "".join(str(x) + ",Not Found in Tree,\n" for x in not_found)
+                csv_content = csv_content + "\n" + nf_rows
+            st.download_button("\u2b07\ufe0f Download distilled_clean_node_ids.csv",
+                data=csv_content.encode(),
                 file_name="distilled_clean_node_ids.csv", mime="text/csv", type="primary")
 
         with tab2:
