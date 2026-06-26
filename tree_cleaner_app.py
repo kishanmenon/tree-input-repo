@@ -3,9 +3,12 @@ import pandas as pd
 from collections import defaultdict
 import io
 import re
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+import time
+import json
+import base64
+import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -56,48 +59,69 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── Google Drive loader ────────────────────────────────────────────────────────
+# ── Google Drive auth via service account JWT (no SDK needed) ──────────────────
+def _make_jwt(sa: dict) -> str:
+    now = int(time.time())
+    header  = base64.urlsafe_b64encode(json.dumps({"alg":"RS256","typ":"JWT"}).encode()).rstrip(b"=")
+    payload = base64.urlsafe_b64encode(json.dumps({
+        "iss":   sa["client_email"],
+        "scope": "https://www.googleapis.com/auth/drive.readonly",
+        "aud":   "https://oauth2.googleapis.com/token",
+        "iat":   now,
+        "exp":   now + 3600,
+    }).encode()).rstrip(b"=")
+    msg = header + b"." + payload
+    private_key = serialization.load_pem_private_key(sa["private_key"].encode(), password=None)
+    sig = private_key.sign(msg, asym_padding.PKCS1v15(), hashes.SHA256())
+    sig_b64 = base64.urlsafe_b64encode(sig).rstrip(b"=")
+    return (msg + b"." + sig_b64).decode()
+
+
+def _get_access_token(sa: dict) -> str:
+    jwt = _make_jwt(sa)
+    resp = requests.post("https://oauth2.googleapis.com/token", data={
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": jwt,
+    })
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
 @st.cache_data(show_spinner="Fetching latest tree.csv from Google Drive…", ttl=300)
-def load_csv_from_drive():
-    """
-    Reads service account credentials from Streamlit secrets,
-    searches the configured folder for tree.csv, and returns its bytes.
-    """
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    folder_id  = st.secrets["DRIVE_FOLDER_ID"]
+def load_csv_from_drive() -> bytes:
+    sa        = dict(st.secrets["gcp_service_account"])
+    folder_id = st.secrets["DRIVE_FOLDER_ID"]
+    token     = _get_access_token(sa)
+    headers   = {"Authorization": f"Bearer {token}"}
 
-    creds   = service_account.Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/drive.readonly"]
+    # Search for tree.csv in folder
+    query = f"name='tree.csv' and '{folder_id}' in parents and trashed=false"
+    r = requests.get(
+        "https://www.googleapis.com/drive/v3/files",
+        params={"q": query, "fields": "files(id,name)"},
+        headers=headers,
     )
-    service = build("drive", "v3", credentials=creds, cache_discovery=False)
-
-    # Find tree.csv in the folder
-    query   = f"name='tree.csv' and '{folder_id}' in parents and trashed=false"
-    results = service.files().list(q=query, fields="files(id, name)").execute()
-    files   = results.get("files", [])
-
+    r.raise_for_status()
+    files = r.json().get("files", [])
     if not files:
         raise FileNotFoundError(
             "tree.csv not found in the configured Google Drive folder. "
-            "Make sure the service account has access to the shared folder."
+            "Make sure the service account has been shared on the folder."
         )
 
     file_id = files[0]["id"]
-    request = service.files().get_media(fileId=file_id)
-    buf     = io.BytesIO()
-    dl      = MediaIoBaseDownload(buf, request)
-    done    = False
-    while not done:
-        _, done = dl.next_chunk()
-
-    buf.seek(0)
-    return buf.read()
+    dl = requests.get(
+        f"https://www.googleapis.com/drive/v3/files/{file_id}",
+        params={"alt": "media"},
+        headers=headers,
+    )
+    dl.raise_for_status()
+    return dl.content
 
 
 # ── Tree builder ───────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner="Building tree index…")
-def build_tree(csv_bytes):
+def build_tree(csv_bytes: bytes):
     df = pd.read_csv(io.BytesIO(csv_bytes))
     df["pathString"] = df["node_path"].str.replace(">", "/", regex=False)
 
@@ -152,7 +176,6 @@ def distill(path, path_map, children_by_path, desc_cache, is_root=False):
 def run_distillation(input_ids, path_map, id_to_path, children_by_path):
     desc_cache = {}
     final_ids, not_found, per_node = [], [], {}
-
     for nid in input_ids:
         if nid in id_to_path:
             result = [x for x in distill(id_to_path[nid], path_map, children_by_path, desc_cache, is_root=True) if x]
@@ -160,13 +183,11 @@ def run_distillation(input_ids, path_map, id_to_path, children_by_path):
             final_ids.extend(result)
         else:
             not_found.append(nid)
-
     seen, deduped = set(), []
     for x in final_ids:
         if x not in seen:
             seen.add(x)
             deduped.append(x)
-
     return deduped, not_found, per_node
 
 
@@ -175,6 +196,7 @@ st.title("🌿 Tree Purity Distiller")
 st.caption("Fetches tree.csv from Google Drive · strips Shopsy nodes · returns minimal clean IDs")
 
 # ── Load tree from Drive ───────────────────────────────────────────────────────
+tree_ready = False
 try:
     csv_bytes = load_csv_from_drive()
     path_map, id_to_path, children_by_path = build_tree(csv_bytes)
@@ -188,16 +210,13 @@ try:
     tree_ready = True
 except FileNotFoundError as e:
     st.error(str(e))
-    tree_ready = False
-except KeyError:
+except KeyError as e:
     st.error(
-        "Streamlit secrets not configured. "
+        f"Streamlit secrets not configured correctly: missing key {e}. "
         "Add `[gcp_service_account]` and `DRIVE_FOLDER_ID` in your app's Secrets settings."
     )
-    tree_ready = False
 except Exception as e:
     st.error(f"Could not load tree from Drive: {e}")
-    tree_ready = False
 
 if tree_ready:
     st.markdown("---")
@@ -221,7 +240,6 @@ if tree_ready:
         )
         if text_input.strip():
             raw_ids = [int(x) for x in re.split(r"[\s,]+", text_input.strip()) if x.strip().isdigit()]
-
     else:
         id_file = st.file_uploader("CSV with a column named 'node_id'", type=["csv"])
         if id_file:
@@ -250,13 +268,12 @@ if tree_ready:
         st.markdown("---")
         st.markdown("### Results")
 
-        # Metrics
         c1, c2, c3, c4 = st.columns(4)
         reduction = round((1 - len(final_ids) / max(len(raw_ids), 1)) * 100, 1)
         for col, val, label in [
-            (c1, len(raw_ids),   "Input IDs"),
-            (c2, len(final_ids), "Clean output IDs"),
-            (c3, len(not_found), "Not found in tree"),
+            (c1, len(raw_ids),        "Input IDs"),
+            (c2, len(final_ids),      "Clean output IDs"),
+            (c3, len(not_found),      "Not found in tree"),
             (c4, f"{abs(reduction)}%", "↓ Reduction" if reduction >= 0 else "↑ Increase"),
         ]:
             with col:
@@ -268,17 +285,14 @@ if tree_ready:
 
         st.markdown("")
 
-        # Output as comma-separated string (on-screen)
+        # On-screen comma-separated output
         csv_string = ", ".join(str(x) for x in final_ids)
         st.markdown("#### Output node IDs")
         st.markdown(f"<div class='output-box'>{csv_string}</div>", unsafe_allow_html=True)
-
-        # Copy helper
-        st.code(csv_string, language=None)  # easy select-all copy
+        st.code(csv_string, language=None)
 
         st.markdown("")
 
-        # Tabs
         tab1, tab2, tab3 = st.tabs(["📋 Full table", "🔍 Per-node breakdown", "⚠️ Not found"])
 
         with tab1:
