@@ -3,7 +3,6 @@ import pandas as pd
 from collections import defaultdict
 import io
 import re
-import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -64,7 +63,7 @@ def load_csv_from_drive():
     Reads service account credentials from Streamlit secrets,
     searches the configured folder for tree.csv, and returns its bytes.
     """
-    creds_dict = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    creds_dict = dict(st.secrets["gcp_service_account"])
     folder_id  = st.secrets["DRIVE_FOLDER_ID"]
 
     creds   = service_account.Credentials.from_service_account_info(
@@ -193,7 +192,7 @@ except FileNotFoundError as e:
 except KeyError:
     st.error(
         "Streamlit secrets not configured. "
-        "Add `GOOGLE_SERVICE_ACCOUNT_JSON` and `DRIVE_FOLDER_ID` in your app's Secrets settings."
+        "Add `[gcp_service_account]` and `DRIVE_FOLDER_ID` in your app's Secrets settings."
     )
     tree_ready = False
 except Exception as e:
