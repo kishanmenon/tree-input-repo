@@ -42,7 +42,7 @@ def load_csv_from_sheet() -> bytes:
         ],
     )
     gc     = gspread.authorize(creds)
-    sheet  = gc.open_by_key(st.secrets["SHEET_ID"]).worksheet("TreeData")
+    sheet  = gc.open_by_key("1KoWMOArhrPP0Y-BxqafOh5uF7eIugB0McKsiymekgxE").worksheet("TreeData")
     data   = sheet.get_all_values()
     df     = pd.DataFrame(data[1:], columns=data[0])
     return df.to_csv(index=False).encode()
