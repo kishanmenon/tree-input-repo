@@ -27,6 +27,7 @@ st.markdown("""
         display: inline-block; background: #e8f0fe; color: #1a73e8;
         border-radius: 6px; padding: 2px 8px; font-size: 0.78rem; margin: 2px;
     }
+    .stDeployButton {display: none !important;}
     .output-box {
         background: white; border: 1px solid #d0e1fd; border-radius: 10px;
         padding: 16px; font-family: monospace; font-size: 0.9rem;
