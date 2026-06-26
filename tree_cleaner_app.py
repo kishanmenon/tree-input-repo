@@ -7,7 +7,16 @@ import gspread
 from google.oauth2 import service_account
 
 # ── Page config ────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Tree Purity Distiller", page_icon="🌿", layout="wide")
+st.set_page_config(
+    page_title="Shopsy Node Remover",
+    page_icon="🌿",
+    layout="wide",
+    menu_items={
+        'Get Help': None,
+        'Report a bug': None,
+        'About': None,
+    }
+)
 
 st.markdown("""
 <style>
@@ -32,7 +41,7 @@ st.markdown("""
 
 
 # ── Google Sheets loader ──────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Fetching latest data from Google Sheet…", ttl=300)
+@st.cache_data(show_spinner="Loading data…", ttl=300)
 def load_csv_from_sheet() -> bytes:
     creds = service_account.Credentials.from_service_account_info(
         dict(st.secrets["gcp_service_account"]),
@@ -49,7 +58,7 @@ def load_csv_from_sheet() -> bytes:
 
 
 # ── Tree builder (vectorized — no iterrows) ────────────────────────────────────
-@st.cache_data(show_spinner="Building tree index…")
+@st.cache_data(show_spinner="Initialising…")
 def build_tree(csv_bytes: bytes):
     df = pd.read_csv(io.BytesIO(csv_bytes))
     df["pathString"] = df["node_path"].str.replace(">", "/", regex=False)
@@ -143,8 +152,7 @@ def run_distillation(input_ids, path_map, id_to_path, children_by_path):
 
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
-st.title("🌿 Tree Purity Distiller")
-st.caption("Fetches tree.csv from Google Drive · strips Shopsy nodes · returns minimal clean IDs")
+st.title("🌿 Shopsy Node Remover")
 
 tree_ready = False
 try:
@@ -152,7 +160,7 @@ try:
     path_map, id_to_path, children_by_path = build_tree(csv_bytes)
     col_info, col_btn = st.columns([5, 1])
     with col_info:
-        st.success(f"✅ Tree loaded from Drive — **{len(id_to_path):,}** nodes (cached 5 min)")
+        st.success("✅ Ready")
     with col_btn:
         if st.button("🔄 Refresh"):
             st.cache_data.clear()
@@ -222,9 +230,15 @@ if tree_ready:
 
         st.markdown("")
         csv_string = ", ".join(str(x) for x in final_ids)
+        not_found_string = ", ".join(str(x) for x in not_found)
+        display_string = csv_string
+        if not_found:
+            display_string += f"
+
+Tree not found: {not_found_string}"
         st.markdown("#### Output node IDs")
-        st.markdown(f"<div class='output-box'>{csv_string}</div>", unsafe_allow_html=True)
-        st.code(csv_string, language=None)
+        st.markdown(f"<div class='output-box'>{display_string.replace(chr(10), '<br>')}</div>", unsafe_allow_html=True)
+        st.code(display_string, language=None)
 
         tab1, tab2, tab3 = st.tabs(["📋 Full table", "🔍 Per-node breakdown", "⚠️ Not found"])
 
